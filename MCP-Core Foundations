@@ -1,0 +1,228 @@
+Why MCP exists and what problems it solves?
+-->Model Context Protocol (MCP) — **concise definition**
+MCP standardizes how contextual data (metadata, provenance, user/session state, retrieval hints, policies) is packaged,
+versioned, and delivered to models at inference or training time. It exists to make model behavior reproducible, safe,
+and auditable by ensuring models receive the right context reliably and in a machine-readable, policy-governed format.
+
+**Problems MCP solves**
+--Incomplete or inconsistent context causing wrong answers or unpredictable model behavior.
+--Lack of provenance and versioning for context, making results hard to reproduce or audit.
+--Ad-hoc, brittle prompt engineering and per-service context handling.
+--Policy enforcement (privacy, compliance, RBAC) scattered or missing.
+
+**How MCP fixes those problems**
+--Defines a small, versioned schema for context bundles and metadata (sources, timestamps, confidence).
+--Provides an API for publishing, signing, and fetching context bundles; supports caching and TTLs.
+--Attaches policy metadata and enforcement hooks (filtering, redaction, allowlists) to context bundles.
+--Enables deterministic routing of context to model versions and records provenance for audits.
+
+**Key benefits*
+--Improved model accuracy and stability through consistent context delivery.
+--Reproducibility and audit trails via versioned, signed context bundles.
+--Centralized policy enforcement and easier compliance.
+--Reduced engineering overhead and less brittle prompt logic.
+
+**Target users**
+--ML engineers and data scientists needing reproducible inference/training inputs.
+--Platform/SRE teams that operate model-serving infra and enforce policies.
+--Product and compliance teams that require auditability and governance.
+
+**Example Python SDK (brief explanation)**
+The class below is a minimal example showing how an SDK could register and fetch a versioned context bundle, sign it,
+cache it, and attach it to a model request payload.
+# python
+
+import time
+import hmac
+import hashlib
+from typing import Dict
+
+class ModelContextClient:
+    def __init__(self, secret_key: bytes, fetcher):
+        """
+        secret_key: bytes used to HMAC-sign bundles
+        fetcher: callable(bundle_id) -> Dict representing remote fetch
+        """
+        self.secret_key = secret_key
+        self.fetcher = fetcher
+        self._cache: Dict[str, Dict] = {}
+
+    def _sign(self, bundle: Dict) -> str:
+        payload = (bundle.get("id", "") + str(bundle.get("version", ""))).encode()
+        return hmac.new(self.secret_key, payload, hashlib.sha256).hexdigest()
+
+    def fetch_bundle(self, bundle_id: str, max_age: int = 60) -> Dict:
+        now = time.time()
+        cached = self._cache.get(bundle_id)
+        if cached and now - cached["_fetched_at"] <= max_age:
+            return cached["bundle"]
+        bundle = self.fetcher(bundle_id)
+        bundle_meta = {
+            "bundle": bundle,
+            "_fetched_at": now,
+            "_signature": self._sign(bundle),
+        }
+        self._cache[bundle_id] = bundle_meta
+        return bundle
+
+    def attach_to_payload(self, payload: Dict, bundle_id: str) -> Dict:
+        bundle = self.fetch_bundle(bundle_id)
+        payload = dict(payload)  # copy
+        payload["_mcp_context"] = {
+            "id": bundle.get("id"),
+            "version": bundle.get("version"),
+            "data": bundle.get("data"),
+            "signature": self._cache[bundle_id]["_signature"],
+        }
+        return payload
+
+# Example usage:
+# client = ModelContextClient(b"secret", remote_fetcher)
+# request_payload = {"input": "some text"}
+# enriched = client.attach_to_payload(request_payload, "bundle:kb_v2")
+
+----------------------------
+**Important Terms**
+
+*Context bundle — Core unit delivered to models; contains payload and metadata.
+*Bundle ID — Unique handle for fetch, cache, and references.
+*Version — Enables reproducibility, rollback, and deterministic experiments.
+*Provenance — Records origin/lineage for trust and audits.
+*Signature — Cryptographic integrity/authenticity check for bundles.
+*TTL / freshness — Controls staleness and cache eviction.
+*Cache — Lowers latency and load while respecting TTL/policies.
+*Fetcher / registry API — Source-of-truth retrieval and authorization surface.
+*Schema / bundle spec — Ensures parseability, validation, and compatibility.
+*Policy metadata — Encodes privacy, compliance, and RBAC rules attached to bundles.
+*Redaction / transformation hooks — Apply policy-driven masking or alteration before delivery.
+*Retrieval hints — Guide relevance (embeddings, selectors, prompt cues) to reduce noise.
+*Merge / resolution strategy — Defines precedence when combining multiple contexts.
+*Deterministic routing — Maps bundles to model versions for consistent behavior.
+*Audit trail / event log — Records fetches, attachments, and policy decisions for compliance.
+*Confidence / provenance scores — Per-item trust metrics used for filtering/weighting.
+*Session state / correlation id — Ties context to user sessions for continuity and tracing.
+*Content-addressable id / checksum — Immutable id and integrity guarantee for deduplication.
+*Enforcement hook / policy engine — Runtime evaluator that accepts/rejects/modifies bundles.
+*Auditability / reproducibility — Outcome of combining versioning, signatures, logs, and routing.
+
+All are part of a practical MCP design; some (e.g., signature, provenance, schema, policy hooks) are high-priority for
+safety and auditability, while others (e.g., merge strategy, retrieval hints) are implementation/optimization concerns.
+---------------------------
+**Server, Client, Tools, Resources, Prompts, Transport — MCP perspective**
+*Server
+Definition: The authoritative service that stores, publishes, signs, and serves context bundles and policy metadata.
+Responsibilities: bundle registry, schema validation, signing/provenance, policy enforcement hooks, audit logging.
+Significance: single source of truth for reproducible, auditable context delivery and access control.
+Example: a registry API that returns a versioned context bundle and its cryptographic signature.
+
+*Client
+Definition: The runtime component that requests bundles, applies local policy, caches results, and attaches context to
+model requests.
+Responsibilities: fetcher integration, TTL/cache management, signature verification, redaction per policy, payload
+enrichment.
+Significance: ensures models receive validated, fresh, and policy-compliant context with low latency.
+Example: an SDK used by a model server to attach a named bundle before inference.
+
+*Tools
+Definition: Developer- or operator-facing utilities that create, test, sign, inspect, and migrate bundles and schemas.
+Responsibilities: bundle authoring, schema linting/migration, signing CLI, replayable audit extractors, simulation/test
+harnesses.
+Significance: reduce human error, enable safe bundle changes, and support reproducibility and compliance workflows.
+Example: a CLI that signs a bundle and publishes it to the server with a changelog entry.
+
+*Resources
+Definition: The data and artifacts inside bundles (documents, embeddings, metadata, confidence scores, policy tags).
+Responsibilities: carry the actual context used by models and include provenance/confidence for each item.
+Significance: primary payload that influences model outputs; resource quality and metadata determine trust and relevance.
+Example: a search result set with per-item timestamps and source IDs inside a bundle.
+
+*Prompts
+Definition: The prompt templates or prompt fragments (and retrieval hints) that guide how resources are combined and
+presented to a model.
+Responsibilities: define insertion points, instruction framing, and retrieval selectors; include versioning and safety
+wrappers.
+Significance: standardizes how context is transformed into model input, reducing brittle ad-hoc prompt engineering.
+Example: a template that injects top-3 resources and an explicit instruction to cite sources.
+
+*Transport
+Definition: The protocol and channels used to move bundles, signatures, and metadata between server, client, and tools
+(HTTP, gRPC, message queues, local cache).
+Responsibilities: ensure integrity, confidentiality, ordering, retry semantics, and efficient delivery (chunking,
+compression, caching headers).
+Significance: affects latency, security, and reliability of context delivery; determines how freshness and audit logs
+are correlated.
+Example: HTTPS + signed JSON bundles with cache-control and an event log published to a message bus for audits.
+
+Summary: Servers hold and enforce, clients fetch and verify, tools operate and validate, resources are the payload,
+prompts shape model input, and transport carries everything reliably and securely.
+---------------------------
+**MCP architecture**
+
+Overview
+Model Context Protocol (MCP) is an architecture and set of components that package, version, deliver, and enforce policies over the contextual data that models consume. It separates responsibilities so context is reproducible, auditable, and safe while keeping runtime latency low.
+
+Core components and their roles
+\- Server (registry)
+  Responsibilities: store/version bundles, validate schema, sign bundles, publish provenance, run server-side policy checks, emit audit events.
+  Significance: authoritative source\-of\-truth and trust anchor for context.
+
+\- Client (SDK / runtime)
+  Responsibilities: fetch bundles, verify signatures, apply local policy/redaction, cache/TTL handling, attach context to model requests.
+  Significance: enforces per-environment policies and minimizes latency via caching.
+
+\- Tools (developer/operator tooling)
+  Responsibilities: author bundles, lint/migrate schemas, sign/publish, run simulation and replay tests, inspect audit logs.
+  Significance: safe bundle lifecycle, auditability, and reduced human error.
+
+\- Resources (bundle payloads)
+  Responsibilities: carry documents, embeddings, metadata, confidence/provenance per item, policy tags.
+  Significance: the actual input that changes model outputs; must be versioned and auditable.
+
+\- Prompts / Prompt Orchestrator
+  Responsibilities: templates, retrieval hints, ranking/selection rules, injection rules for how resources map into model input.
+  Significance: standardizes prompt construction and prevents brittle ad\-hoc prompt logic.
+
+\- Transport layer
+  Responsibilities: secure, reliable delivery (HTTPS/gRPC/queues), caching headers, chunking, retry semantics, integrity guarantees.
+  Significance: affects latency, confidentiality, ordering, and correlation of audit events.
+
+\- Policy Engine / Enforcement Hooks
+  Responsibilities: evaluate privacy, RBAC, redaction, allow/deny rules either server\-side or client\-side.
+  Significance: prevents leakage of sensitive content and enforces compliance consistently.
+
+\- Cache / Edge store
+  Responsibilities: local copies of bundles with TTL, freshness checks, offline resilience.
+  Significance: reduces fetch latency and load on registry while respecting freshness.
+
+\- Audit / Event Log
+  Responsibilities: record fetches, attachments, policy decisions, signatures, routing and model version used.
+  Significance: enables reproducibility and compliance evidence.
+
+Typical end\-to\-end flows (high level)
+1. Authoring: tools create a versioned bundle (resources, schema, policy metadata).
+2. Publishing: server validates, signs, stores bundle, emits audit event.
+3. Request time: client resolves a bundle id or retrieval hint and asks server (or cache).
+4. Verification & enforcement: client verifies signature, applies policy hooks / redaction.
+5. Attachment: client injects standardized prompt and bundle metadata into the model request.
+6. Model routing: deterministic routing sends the enriched request to a specific model/version.
+7. Logging: client and server record events for audit and reproducibility.
+
+Key data and guarantees
+\- Unique bundle IDs (optionally content\-addressed) and explicit versions for reproducibility.
+\- Cryptographic signatures and provenance metadata for integrity and trust.
+\- Schema and bundle spec for forward/backward compatibility.
+\- TTL/freshness and cache semantics to balance latency vs. staleness.
+\- Audit trail linking bundle id + bundle version + model version + policy decisions.
+
+Non\-functional concerns
+\- Security: transport encryption, signature verification, RBAC on registry APIs.
+\- Latency: caching, compact bundle formats, selective resource inclusion via retrieval hints.
+\- Scalability: sharding, CDN/edge caches, chunked transports for large bundles.
+\- Observability: end\-to\-end tracing that correlates fetch, attach, and inference events.
+\- Reproducibility: immutable ids/versions, logged mapping of bundle → model → output.
+
+Summary
+MCP organizes context delivery into clear components: authoritative servers that publish signed, versioned bundles;
+clients that fetch, verify, enforce policy, and attach context; tools that manage bundle lifecycle; and transports/audit
+systems that ensure secure, observable delivery and reproducible results.
+---------------------------
