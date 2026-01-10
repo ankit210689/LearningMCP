@@ -226,3 +226,88 @@ MCP organizes context delivery into clear components: authoritative servers that
 clients that fetch, verify, enforce policy, and attach context; tools that manage bundle lifecycle; and transports/audit
 systems that ensure secure, observable delivery and reproducible results.
 ---------------------------
+
+Appendix: What I built — simple MCP server (non-programmer summary)
+
+This short summary explains, in plain language, what I created for the "LearningMCP" project so someone
+without programming experience can understand the purpose and how to try it out.
+
+1) What I built
+- A very small "MCP server" that stores and serves versioned context bundles. Think of it as a tiny library
+  service: you can "publish" a bundle (upload it) and later "fetch" it (download it) for use with a model.
+- The server checks a secret signature when a bundle is published so it only accepts bundles signed by someone
+  who knows the secret key.
+
+2) Files I added (what each one does)
+- `server.py` — the web server. It provides three simple addresses:
+  - `/mcp/publish` (upload a bundle),
+  - `/mcp/fetch/{bundle-id}` (get a bundle back), and
+  - `/mcp/health` (a tiny check that the server is running).
+- `mcp/signing.py` — signs bundles and checks signatures using a shared secret (a password kept in the server
+  environment). This protects integrity: clients can detect tampering.
+- `mcp/storage.py` — saves bundles to disk safely. Bundles are stored in the `data/` folder so they persist across
+  restarts.
+- `requirements.txt` — lists the small set of software libraries needed to run the server.
+- `README.md` — quick instructions and notes about the server.
+- `tests/test_mcp.py` — an automated check that simulates publishing a bundle and then fetching it back to verify
+  everything works.
+
+3) How to run the server (summary of steps)
+- These are the exact commands you can copy/paste into a Mac Terminal (zsh). They create a small Python environment,
+  install needed software, set the secret key, and start the server.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export MCP_SECRET="your-secret-here"   # keep this secret! (choose a strong password)
+python server.py
+```
+
+- Once the server is running, the health check is available at: `http://127.0.0.1:8080/mcp/health`.
+
+4) How to try publishing and fetching a bundle (simple example)
+- Use the terminal to create a signature and publish the bundle (this example uses Python to compute the signature):
+
+```bash
+export MCP_SECRET="your-secret-here"  # same secret used by the server
+python - <<'PY'
+import os, json, hmac, hashlib, requests
+bundle = {"id":"b1","version":"1.0.0","data":{"hello":"world"}}
+secret = os.environ['MCP_SECRET']
+sig = hmac.new(secret.encode(), json.dumps(bundle, sort_keys=True, separators=(',',':')).encode(), hashlib.sha256).hexdigest()
+resp = requests.post('http://127.0.0.1:8080/mcp/publish', json={"path":"b1","bundle":bundle}, headers={"X-MCP-Signature": sig})
+print('publish status:', resp.status_code, resp.text)
+PY
+```
+
+- Fetch the bundle with curl:
+
+```bash
+curl http://127.0.0.1:8080/mcp/fetch/b1
+```
+
+5) How I tested it
+- I added an automated test that runs in the project and verifies that publishing a signed bundle and then fetching
+  it returns the same data. You can run the tests like this:
+
+```bash
+export MCP_SECRET=testsecret
+python -m pytest -q
+```
+
+6) Simple security notes (non-technical)
+- The server uses a secret (like a password) called `MCP_SECRET`. Anyone who knows that secret can publish bundles,
+  so keep it private. In real deployments you would store this secret in a safer place (not in plain files).
+- The signature makes sure the bundle was created by someone who knows the secret and that the bundle wasn't
+  changed on the way.
+- For production use you should run the server behind secure HTTPS and add access controls so only trusted users
+  can publish or fetch bundles.
+
+7) Where to find the new code (file locations)
+- Project root: `server.py`
+- Signing code: `mcp/signing.py`
+- Storage code: `mcp/storage.py`
+- Tests: `tests/test_mcp.py`
+- Instructions: `README.md`
+
